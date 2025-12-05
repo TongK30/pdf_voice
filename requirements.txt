@@ -1,0 +1,5 @@
+streamlit
+pytesseract
+edge-tts
+pymupdf
+Pillow
