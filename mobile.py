@@ -7,7 +7,7 @@ import shutil
 import time
 import streamlit.components.v1 as components
 
-# --- CẤU HÌNH HỆ THỐNG ---
+# --- CẤU HÌNH ---
 if sys.platform.startswith('win'):
     PATH_TESSERACT = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 else:
@@ -16,178 +16,114 @@ else:
 if PATH_TESSERACT:
     pytesseract.pytesseract.tesseract_cmd = PATH_TESSERACT
 
-# --- HÀM XỬ LÝ ẢNH ---
+# --- HÀM XỬ LÝ (CHẾ ĐỘ TIẾT KIỆM RAM) ---
 @st.cache_data(show_spinner=False)
-def get_page_content(pdf_bytes, page_number):
+def get_page_lite(pdf_bytes, page_number):
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page = doc.load_page(page_number - 1)
         
-        # Giảm chất lượng ảnh hiển thị một chút để load nhanh trên 4G
-        mat = fitz.Matrix(1.5, 1.5) 
+        # GIẢM DPI XUỐNG 1.2 (Thay vì 2.0) -> Ảnh nhẹ hơn 4 lần -> Không bị sập
+        mat = fitz.Matrix(1.2, 1.2) 
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img_visual = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         
-        # OCR vẫn dùng chất lượng cao ngầm bên dưới
+        # OCR vẫn đọc tốt
         img_ocr = ImageOps.grayscale(img_visual)
-        img_ocr = ImageEnhance.Contrast(img_ocr).enhance(2.0)
         custom_config = r'--oem 3 --psm 6'
         text = pytesseract.image_to_string(img_ocr, lang='vie', config=custom_config)
         
-        text = text.replace('\n', ' ').strip()
-        return img_visual, text
+        return img_visual, text.replace('\n', ' ').strip()
     except Exception as e:
         return None, str(e)
 
-# --- JAVASCRIPT CHO MOBILE (QUAN TRỌNG) ---
-def speak_mobile_optimized(text, page_num):
-    # Làm sạch kỹ văn bản
+# --- JS ĐỌC CHO MOBILE ---
+def mobile_speak(text):
     safe_text = text.replace('\\', '').replace('"', '').replace("'", "").replace('\n', ' ')
-    
-    html_code = f"""
+    html = f"""
     <script>
-        // Hàm chính
-        function startSpeaking() {{
-            window.speechSynthesis.cancel(); // Reset
+        window.speechSynthesis.cancel();
+        var msg = new SpeechSynthesisUtterance();
+        msg.text = "{safe_text}";
+        msg.lang = 'vi-VN';
+        msg.rate = 1.0;
+        
+        // Tìm giọng
+        var voices = window.speechSynthesis.getVoices();
+        var vn = voices.find(v => v.lang.includes('vi'));
+        if (vn) msg.voice = vn;
 
-            var msg = new SpeechSynthesisUtterance();
-            msg.text = "{safe_text}";
-            msg.lang = 'vi-VN'; 
-            msg.rate = 1.0; // Tốc độ chuẩn (1.0) an toàn nhất cho Android
-            
-            // --- LOGIC TÌM GIỌNG CHO ĐIỆN THOẠI ---
-            var voices = window.speechSynthesis.getVoices();
-            
-            // 1. Tìm bất kỳ giọng nào có chữ 'vi' hoặc 'Vietnamese'
-            // Trên iPhone nó sẽ tìm thấy 'Linh', trên Android là 'Google Vietnamese'
-            var vnVoice = voices.find(v => v.lang.includes('vi') || v.name.includes('Vietnu'));
-            
-            if (vnVoice) {{
-                msg.voice = vnVoice;
-                console.log("Mobile Voice Found: " + vnVoice.name);
-            }} else {{
-                console.log("Không tìm thấy giọng Việt, dùng giọng mặc định");
-            }}
-
-            // --- SỰ KIỆN CHUYỂN TRANG ---
-            msg.onend = function(event) {{
-                var buttons = window.parent.document.getElementsByTagName('button');
-                for (var i = 0; i < buttons.length; i++) {{
-                    if (buttons[i].innerText.includes("Auto Next")) {{
-                        buttons[i].click();
-                        break;
-                    }}
-                }}
-            }};
-
-            // Khắc phục lỗi iOS Safari hay bị sleep
-            msg.onerror = function(e) {{
-                console.log("Audio Error, trying to skip...");
-                // Nếu lỗi, vẫn bấm next để không bị kẹt
-                var buttons = window.parent.document.getElementsByTagName('button');
-                for (var i = 0; i < buttons.length; i++) {{
-                    if (buttons[i].innerText.includes("Auto Next")) {{
-                        buttons[i].click(); break;
-                    }}
-                }}
-            }};
-
-            window.speechSynthesis.speak(msg);
-            
-            // --- HACK CHO ANDROID CHROME ---
-            // Android Chrome hay bị ngắt giữa chừng, cần 'resume' liên tục
-            if (window.speechInterval) clearInterval(window.speechInterval);
-            window.speechInterval = setInterval(function() {{
-                if (!window.speechSynthesis.speaking) {{
-                    clearInterval(window.speechInterval);
-                }} else {{
-                    window.speechSynthesis.pause();
-                    window.speechSynthesis.resume();
-                }}
-            }}, 5000);
-        }}
-
-        // Đợi giọng load xong (iPhone load giọng chậm)
-        if (window.speechSynthesis.getVoices().length === 0) {{
-            window.speechSynthesis.addEventListener('voiceschanged', startSpeaking);
-        }} else {{
-            startSpeaking();
-        }}
+        // Tự động bấm nút Next khi đọc xong
+        msg.onend = function(e) {{
+            var btn = window.parent.document.querySelector('button[kind="primary"]');
+            if (btn && btn.innerText.includes("TIẾP THEO")) btn.click();
+        }};
+        
+        window.speechSynthesis.speak(msg);
     </script>
     """
-    components.html(html_code, height=0)
+    components.html(html, height=0)
 
-# --- GIAO DIỆN CHÍNH ---
-st.set_page_config(page_title="Mobile PDF Reader", layout="centered") # Layout centered tốt cho điện thoại
+# --- GIAO DIỆN ĐƠN GIẢN (KHÔNG CHIA CỘT) ---
+st.set_page_config(page_title="Mobile Lite", layout="centered")
 
-st.header("📱 Đọc PDF trên Điện thoại")
+st.title("📱 PDF Reader Lite")
 
-with st.expander("Cài đặt & Upload", expanded=True):
-    uploaded_file = st.file_uploader("Chọn file PDF:", type="pdf")
-    st.info("⚠️ iPhone: Nhớ tắt chế độ Im Lặng (gạt nút bên hông máy) để nghe tiếng.")
+# 1. Upload
+uploaded_file = st.file_uploader("Chọn PDF:", type="pdf")
 
 if uploaded_file:
-    if 'current_page' not in st.session_state: st.session_state.current_page = 1
-    if 'is_auto' not in st.session_state: st.session_state.is_auto = False
+    if 'curr_page' not in st.session_state: st.session_state.curr_page = 1
+    if 'auto' not in st.session_state: st.session_state.auto = False
 
+    # Load File
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-    total_pages = doc.page_count
+    total = doc.page_count
     uploaded_file.seek(0)
     bytes_data = uploaded_file.read()
 
-    # --- ĐIỀU KHIỂN ---
-    col1, col2, col3 = st.columns([1, 2, 1])
+    # 2. Thanh điều khiển (Nút bấm to rõ)
+    st.write(f"📖 **Trang {st.session_state.curr_page} / {total}**")
     
-    with col2:
-        st.markdown(f"<h3 style='text-align: center'>Trang {st.session_state.current_page}/{total_pages}</h3>", unsafe_allow_html=True)
-        
-        # Chọn trang (Dùng Selectbox cho dễ bấm trên điện thoại thay vì number_input)
-        # Tạo danh sách trang để chọn
-        page_options = list(range(1, total_pages + 1))
-        selected_page = st.selectbox("Chọn trang nhảy tới:", page_options, index=st.session_state.current_page-1, label_visibility="collapsed")
-        
-        if selected_page != st.session_state.current_page:
-            st.session_state.current_page = selected_page
+    # Dùng 2 nút Next/Back đơn giản
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("⬅️ Lùi lại", use_container_width=True):
+            if st.session_state.curr_page > 1:
+                st.session_state.curr_page -= 1
+                st.rerun()
+    with c2:
+        # Nút này JS sẽ tự bấm
+        if st.button("TIẾP THEO ➡️", type="primary", use_container_width=True):
+            if st.session_state.curr_page < total:
+                st.session_state.curr_page += 1
+                st.session_state.auto = True
+                st.rerun()
+
+    # Nút Bắt đầu / Dừng
+    if st.session_state.auto:
+        if st.button("🟥 DỪNG ĐỌC", use_container_width=True):
+            components.html("<script>window.speechSynthesis.cancel()</script>", height=0)
+            st.session_state.auto = False
             st.rerun()
-
-    with col1:
-        if st.button("⬅️"):
-            if st.session_state.current_page > 1:
-                st.session_state.current_page -= 1
-                st.rerun()
-
-    with col3:
-        # Nút Next cho JS bấm
-        if st.button("Auto Next ➡️"):
-            if st.session_state.current_page < total_pages:
-                st.session_state.current_page += 1
-                st.session_state.is_auto = True
-                st.rerun()
-
-    # Nút Bắt đầu to dễ bấm
-    if st.session_state.is_auto:
-        if st.button("🟥 DỪNG LẠI", type="primary", use_container_width=True):
-             components.html("<script>window.speechSynthesis.cancel();</script>", height=0)
-             st.session_state.is_auto = False
-             st.rerun()
     else:
-        if st.button("▶️ BẮT ĐẦU ĐỌC", use_container_width=True):
-            st.session_state.is_auto = True
+        if st.button("▶️ BẮT ĐẦU TỰ ĐỘNG", use_container_width=True):
+            st.session_state.auto = True
             st.rerun()
 
-    # --- HIỂN THỊ & ĐỌC ---
-    img_show, text_content = get_page_content(bytes_data, st.session_state.current_page)
+    # 3. Hiển thị Ảnh & Đọc
+    img, text = get_page_lite(bytes_data, st.session_state.curr_page)
     
-    if img_show:
-        st.image(img_show, use_container_width=True)
-
-    if st.session_state.is_auto:
-        if text_content:
-            st.toast(f"🔊 Đang đọc trang {st.session_state.current_page}...")
-            speak_mobile_optimized(text_content, st.session_state.current_page)
+    if img:
+        st.image(img, use_container_width=True) # Ảnh tự co giãn theo màn hình điện thoại
+    
+    if st.session_state.auto:
+        if text:
+            st.toast(f"Đang đọc trang {st.session_state.curr_page}...")
+            mobile_speak(text)
         else:
-            st.warning("Trang trắng. Qua trang sau...")
+            st.warning("Trang trắng. Đang chuyển...")
             time.sleep(1)
-            if st.session_state.current_page < total_pages:
-                st.session_state.current_page += 1
+            if st.session_state.curr_page < total:
+                st.session_state.curr_page += 1
                 st.rerun()
