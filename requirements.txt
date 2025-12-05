@@ -3,3 +3,4 @@ pytesseract
 edge-tts
 pymupdf
 Pillow
+gTTS
