@@ -6,8 +6,6 @@ import sys
 import shutil
 import time
 import streamlit.components.v1 as components
-import cv2
-import numpy as np
 
 # --- CẤU HÌNH ---
 if sys.platform.startswith('win'):
@@ -18,38 +16,35 @@ else:
 if PATH_TESSERACT:
     pytesseract.pytesseract.tesseract_cmd = PATH_TESSERACT
 
-# --- HÀM XỬ LÝ ẢNH (OPENCV) ---
+# --- HÀM XỬ LÝ ẢNH (LITE) ---
 @st.cache_data(show_spinner=False)
-def get_page_v29(pdf_bytes, page_number):
+def get_page_lite(pdf_bytes, page_number):
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page = doc.load_page(page_number - 1)
         
-        mat = fitz.Matrix(1.5, 1.5) 
+        # Matrix 1.2 cho nhẹ máy
+        mat = fitz.Matrix(1.2, 1.2) 
         pix = page.get_pixmap(matrix=mat, alpha=False)
-        img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img_visual = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         
-        img_np = np.array(img_pil) 
-        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-        processed_img = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 9)
-        final_img = Image.fromarray(processed_img)
+        # OCR
+        img_ocr = ImageOps.grayscale(img_visual)
+        img_ocr = ImageEnhance.Contrast(img_ocr).enhance(1.5)
         
         custom_config = r'--oem 3 --psm 6'
-        text = pytesseract.image_to_string(final_img, lang='vie', config=custom_config)
+        text = pytesseract.image_to_string(img_ocr, lang='vie', config=custom_config)
         
-        # Làm sạch text: Xóa xuống dòng thừa, giữ lại dấu câu quan trọng
-        clean_text = text.replace('\n', ' ').replace('|', '').strip()
+        # Làm sạch cơ bản
+        text = text.replace('\n', ' ').replace('|', '').strip()
         
-        if not clean_text or len(clean_text) < 2:
-            return img_pil, "Trang này chỉ có hình ảnh."
-            
-        return img_pil, clean_text
+        return img_visual, text
     except Exception as e:
         return None, str(e)
 
-# --- JS CHIA NHỎ CÂU (KHẮC PHỤC LỖI DỪNG GIỮA CHỪNG) ---
-def speak_chunks(text):
-    # Xử lý text để JS không lỗi
+# --- JS ĐỌC TỪNG CÂU (CHỐNG NGẮT QUÃNG) ---
+def mobile_speak_smooth(text):
+    # Lọc ký tự gây lỗi
     safe_text = text.replace('\\', '').replace('"', '').replace("'", "").replace('\n', ' ')
     
     html = f"""
@@ -57,76 +52,71 @@ def speak_chunks(text):
         // 1. Hủy lệnh cũ
         window.speechSynthesis.cancel();
         
-        // 2. Chia văn bản thành các câu nhỏ (Dựa vào dấu . ! ? ;)
-        // Regex này tách câu nhưng vẫn giữ lại dấu câu
-        var textContent = "{safe_text}";
-        var sentences = textContent.match(/[^.!?]+[.!?]+|[^.!?]+$/g);
+        // 2. Chia văn bản thành mảng các câu (Dựa vào dấu . ! ? ;)
+        var fullText = "{safe_text}";
+        // Regex này tách câu nhưng giữ lại dấu câu để đọc có ngữ điệu
+        var sentences = fullText.match(/[^.!?]+[.!?]+|[^.!?]+$/g);
         
         if (!sentences || sentences.length === 0) {{
-            sentences = [textContent]; // Nếu không chia được thì đọc cả cục
+            sentences = [fullText]; // Nếu không chia được thì đọc cả cục
         }}
 
         var currentIndex = 0;
 
-        function speakNextSentence() {{
-            // Nếu đã đọc hết các câu -> Bấm Next trang
+        function playNextChunk() {{
+            // NẾU ĐÃ ĐỌC HẾT CÁC CÂU -> BẤM NEXT TRANG
             if (currentIndex >= sentences.length) {{
-                console.log("Đã đọc hết trang. Chuyển trang...");
+                console.log("Xong trang. Chuyển tiếp...");
                 var buttons = window.parent.document.getElementsByTagName('button');
                 for (var i = 0; i < buttons.length; i++) {{
                     if (buttons[i].innerText.toUpperCase().includes("TIẾP THEO")) {{
-                        buttons[i].click();
-                        return;
+                        buttons[i].click(); return;
                     }}
                 }}
                 return;
             }}
 
-            // Lấy câu hiện tại
-            var sentence = sentences[currentIndex];
-            if (!sentence || sentence.trim().length === 0) {{
-                currentIndex++;
-                speakNextSentence();
-                return;
+            var chunk = sentences[currentIndex];
+            if (!chunk || chunk.trim().length === 0) {{
+                currentIndex++; playNextChunk(); return;
             }}
 
-            // Tạo lệnh đọc
+            // TẠO LỆNH ĐỌC CHO CÂU HIỆN TẠI
             var msg = new SpeechSynthesisUtterance();
-            msg.text = sentence;
+            msg.text = chunk;
             msg.lang = 'vi-VN';
-            msg.rate = 1.0;
+            msg.rate = 1.0; 
 
-            // Tìm giọng
             var voices = window.speechSynthesis.getVoices();
             var vn = voices.find(v => v.lang.includes('vi'));
             if (vn) msg.voice = vn;
 
-            // QUAN TRỌNG: Khi đọc xong câu này -> Đọc câu tiếp theo
+            // QUAN TRỌNG: Đọc xong câu này -> Gọi lại hàm để đọc câu sau
             msg.onend = function(e) {{
-                console.log("Xong câu " + currentIndex);
                 currentIndex++;
-                speakNextSentence(); // Đệ quy: Gọi lại chính nó
+                playNextChunk(); 
             }};
-
+            
+            // Nếu lỗi câu này -> Bỏ qua đọc câu sau luôn
             msg.onerror = function(e) {{
-                console.log("Lỗi câu " + currentIndex + ", bỏ qua...");
+                console.log("Lỗi chunk, skip...");
                 currentIndex++;
-                speakNextSentence();
+                playNextChunk();
             }};
 
             window.speechSynthesis.speak(msg);
         }}
-
-        // Bắt đầu quy trình
+        
+        // --- CHỜ LOAD GIỌNG RỒI MỚI ĐỌC ---
         if (window.speechSynthesis.getVoices().length === 0) {{
             window.speechSynthesis.addEventListener('voiceschanged', function() {{
-                speakNextSentence();
+                playNextChunk();
             }});
         }} else {{
-            speakNextSentence();
+            playNextChunk();
         }}
         
-        // Anti-Sleep (Giữ cho trình duyệt không ngủ gật)
+        // --- ANTI SLEEP (GIỮ KẾT NỐI) ---
         if (window.speechInterval) clearInterval(window.speechInterval);
         window.speechInterval = setInterval(function() {{
             if (window.speechSynthesis.speaking) {{
@@ -139,11 +129,12 @@ def speak_chunks(text):
     """
     components.html(html, height=0)
 
-# --- GIAO DIỆN ---
-st.set_page_config(page_title="PDF Chunk Reader", layout="centered")
-st.markdown("<h3 style='text-align: center;'>📖 Đọc PDF (Không bao giờ ngắt)</h3>", unsafe_allow_html=True)
+# --- GIAO DIỆN CHÍNH ---
+st.set_page_config(page_title="PDF Smooth V30", layout="centered")
 
-uploaded_file = st.file_uploader("Upload PDF:", type="pdf")
+st.markdown("<h3 style='text-align: center;'>📱 PDF Smooth (V30)</h3>", unsafe_allow_html=True)
+
+uploaded_file = st.file_uploader("Chọn file PDF:", type="pdf")
 
 if uploaded_file:
     if 'curr_page' not in st.session_state: st.session_state.curr_page = 1
@@ -154,22 +145,29 @@ if uploaded_file:
     uploaded_file.seek(0)
     bytes_data = uploaded_file.read()
 
-    # Chọn trang
+    # --- CHỌN TRANG ---
     st.write("---")
-    c_jump, c_label = st.columns([2, 1])
-    with c_jump:
-        new_page = st.number_input("Trang:", 1, total, st.session_state.curr_page, label_visibility="collapsed")
-    with c_label:
-        st.write(f"/ {total}")
+    col_jump, col_label = st.columns([2, 1])
+    
+    with col_jump:
+        new_page = st.number_input(
+            "Nhập số trang:", 
+            min_value=1, 
+            max_value=total, 
+            value=st.session_state.curr_page,
+            label_visibility="collapsed"
+        )
+    with col_label:
+        st.markdown(f"** / {total} trang**")
 
     if new_page != st.session_state.curr_page:
         st.session_state.curr_page = new_page
         st.rerun()
 
-    # Nút bấm
+    # --- NÚT ĐIỀU HƯỚNG ---
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("⬅️ BACK", use_container_width=True):
+        if st.button("⬅️ LÙI LẠI", use_container_width=True):
             if st.session_state.curr_page > 1:
                 st.session_state.curr_page -= 1
                 st.rerun()
@@ -180,24 +178,36 @@ if uploaded_file:
                 st.session_state.auto = True
                 st.rerun()
 
+    # --- PLAY / STOP ---
     if st.session_state.auto:
-        if st.button("🟥 DỪNG LẠI", use_container_width=True):
+        if st.button("🟥 DỪNG ĐỌC", use_container_width=True):
             components.html("<script>window.speechSynthesis.cancel()</script>", height=0)
             st.session_state.auto = False
             st.rerun()
     else:
-        if st.button("▶️ BẮT ĐẦU ĐỌC", use_container_width=True):
+        if st.button("▶️ BẮT ĐẦU TỰ ĐỘNG", use_container_width=True):
             st.session_state.auto = True
             st.rerun()
 
-    # Xử lý & Hiển thị
-    img, text = get_page_v29(bytes_data, st.session_state.curr_page)
+    # --- HIỂN THỊ ẢNH ---
+    img, text = get_page_lite(bytes_data, st.session_state.curr_page)
     
-    if img: st.image(img, use_container_width=True)
+    if img:
+        st.image(img, use_container_width=True)
     
-    st.info("📝 Văn bản đang xử lý:")
-    st.text_area("", text, height=100, label_visibility="collapsed")
-
+    # --- XỬ LÝ ĐỌC ---
     if st.session_state.auto:
-        st.toast(f"🔊 Đang đọc từng câu trang {st.session_state.curr_page}...")
-        speak_chunks(text)
+        # ÉP ĐỌC: Kể cả ít chữ cũng đọc
+        if text:
+            st.toast(f"🔊 Đang đọc trang {st.session_state.curr_page}...")
+            mobile_speak_smooth(text)
+            
+            # Hiển thị text mờ mờ bên dưới để biết nó đang đọc cái gì
+            with st.expander("Xem văn bản đang đọc"):
+                st.write(text)
+        else:
+            st.warning("Trang trắng. Chuyển trang...")
+            time.sleep(1)
+            if st.session_state.curr_page < total:
+                st.session_state.curr_page += 1
+                st.rerun()
